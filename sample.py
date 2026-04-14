@@ -1,5 +1,6 @@
 import json
-from typing import Any, List
+from statistics import mean
+from typing import Any, Optional
 
 from datamodel import Listing, Observation, Order, OrderDepth, ProsperityEncoder, Symbol, Trade, TradingState
 
@@ -121,29 +122,141 @@ logger = Logger()
 
 
 class Trader:
+    POSITION_LIMITS = {"ASH_COATED_OSMIUM": 80, "INTARIAN_PEPPER_ROOT": 80}
+
+    def _best_bid_ask(self, order_depth: OrderDepth) -> tuple[Optional[int], Optional[int]]:
+        best_bid = max(order_depth.buy_orders) if order_depth.buy_orders else None
+        best_ask = min(order_depth.sell_orders) if order_depth.sell_orders else None
+        return best_bid, best_ask
+
+    def _mid_price(self, order_depth: OrderDepth) -> Optional[float]:
+        best_bid, best_ask = self._best_bid_ask(order_depth)
+        if best_bid is None and best_ask is None:
+            return None
+        if best_bid is None:
+            return float(best_ask)
+        if best_ask is None:
+            return float(best_bid)
+        return (best_bid + best_ask) / 2.0
+
+    def _allowable_buy(self, product: Symbol, position: int) -> int:
+        return max(0, self.POSITION_LIMITS[product] - position)
+
+    def _allowable_sell(self, product: Symbol, position: int) -> int:
+        return max(0, self.POSITION_LIMITS[product] + position)
+
+    def _place_taking_orders(
+        self,
+        product: Symbol,
+        order_depth: OrderDepth,
+        fair_value: float,
+        position: int,
+        edge: int,
+    ) -> tuple[list[Order], int]:
+        orders: list[Order] = []
+
+        buy_remaining = self._allowable_buy(product, position)
+        for ask_price in sorted(order_depth.sell_orders):
+            if ask_price > fair_value - edge or buy_remaining <= 0:
+                break
+            available = -order_depth.sell_orders[ask_price]
+            qty = min(available, buy_remaining)
+            if qty > 0:
+                orders.append(Order(product, ask_price, qty))
+                position += qty
+                buy_remaining -= qty
+
+        sell_remaining = self._allowable_sell(product, position)
+        for bid_price in sorted(order_depth.buy_orders, reverse=True):
+            if bid_price < fair_value + edge or sell_remaining <= 0:
+                break
+            available = order_depth.buy_orders[bid_price]
+            qty = min(available, sell_remaining)
+            if qty > 0:
+                orders.append(Order(product, bid_price, -qty))
+                position -= qty
+                sell_remaining -= qty
+
+        return orders, position
+
+    def _place_making_orders(
+        self,
+        product: Symbol,
+        order_depth: OrderDepth,
+        fair_value: float,
+        position: int,
+        base_size: int,
+    ) -> list[Order]:
+        orders: list[Order] = []
+        best_bid, best_ask = self._best_bid_ask(order_depth)
+        if best_bid is None or best_ask is None:
+            return orders
+
+        buy_capacity = self._allowable_buy(product, position)
+        sell_capacity = self._allowable_sell(product, position)
+        if buy_capacity <= 0 and sell_capacity <= 0:
+            return orders
+
+        buy_quote = min(best_bid + 1, int(fair_value - 1))
+        sell_quote = max(best_ask - 1, int(fair_value + 1))
+        if buy_quote >= sell_quote:
+            buy_quote = best_bid
+            sell_quote = best_ask
+
+        skew = position / self.POSITION_LIMITS[product]
+        buy_size = min(buy_capacity, max(0, int(base_size * (1.0 - max(0.0, skew)))))
+        sell_size = min(sell_capacity, max(0, int(base_size * (1.0 + min(0.0, skew)))))
+
+        if buy_size > 0:
+            orders.append(Order(product, buy_quote, buy_size))
+        if sell_size > 0:
+            orders.append(Order(product, sell_quote, -sell_size))
+        return orders
+
+    def _fair_values(self, state: TradingState) -> dict[Symbol, float]:
+        mids: dict[Symbol, float] = {}
+        for product, depth in state.order_depths.items():
+            mid = self._mid_price(depth)
+            if mid is not None:
+                mids[product] = mid
+
+        osmium_mid = mids.get("ASH_COATED_OSMIUM", 10_000.0)
+        pepper_mid = mids.get("INTARIAN_PEPPER_ROOT", 11_000.0)
+        pepper_anchor = 11_000.0
+
+        return {
+            "ASH_COATED_OSMIUM": mean([osmium_mid, 10_000.0]),
+            "INTARIAN_PEPPER_ROOT": mean([pepper_mid, pepper_anchor]),
+        }
+
     def run(self, state: TradingState):
-        result = {}
-        for product in state.order_depths:
-            order_depth: OrderDepth = state.order_depths[product]
-            orders: List[Order] = []
-            acceptable_price = 10
+        result: dict[Symbol, list[Order]] = {}
+        fair_values = self._fair_values(state)
 
-            logger.print("Acceptable price : " + str(acceptable_price))
-            logger.print("Buy Order depth : " + str(len(order_depth.buy_orders)) + ", Sell order depth : " + str(len(order_depth.sell_orders)))
+        for product in self.POSITION_LIMITS:
+            if product not in state.order_depths:
+                continue
 
-            if len(order_depth.sell_orders) != 0:
-                best_ask, best_ask_amount = list(order_depth.sell_orders.items())[0]
-                if int(best_ask) < acceptable_price:
-                    logger.print("BUY", str(-best_ask_amount) + "x", best_ask)
-                    orders.append(Order(product, best_ask, -best_ask_amount))
+            order_depth = state.order_depths[product]
+            position = state.position.get(product, 0)
+            fair_value = fair_values[product]
 
-            if len(order_depth.buy_orders) != 0:
-                best_bid, best_bid_amount = list(order_depth.buy_orders.items())[0]
-                if int(best_bid) > acceptable_price:
-                    logger.print("SELL", str(best_bid_amount) + "x", best_bid)
-                    orders.append(Order(product, best_bid, -best_bid_amount))
+            take_edge = 1 if product == "INTARIAN_PEPPER_ROOT" else 2
+            make_size = 12 if product == "INTARIAN_PEPPER_ROOT" else 15
 
+            orders, post_take_position = self._place_taking_orders(
+                product, order_depth, fair_value, position, take_edge
+            )
+            orders.extend(
+                self._place_making_orders(product, order_depth, fair_value, post_take_position, make_size)
+            )
             result[product] = orders
+
+            logger.print(
+                f"{product} pos={position} fair={fair_value:.1f} "
+                f"bids={len(order_depth.buy_orders)} asks={len(order_depth.sell_orders)} "
+                f"orders={len(orders)}"
+            )
 
         trader_data = ""
         conversions = 0

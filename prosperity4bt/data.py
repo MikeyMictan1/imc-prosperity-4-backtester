@@ -7,7 +7,12 @@ from prosperity4bt.file_reader import FileReader
 
 DEFAULT_POSITION_LIMIT = 50
 
-LIMITS: dict[str, int] = {"EMERALDS": 80, "TOMATOES": 80}
+LIMITS: dict[str, int] = {
+    "EMERALDS": 80,
+    "TOMATOES": 80,
+    "ASH_COATED_OSMIUM": 80,
+    "INTARIAN_PEPPER_ROOT": 80,
+}
 
 
 def get_position_limit(symbol: str, overrides: Optional[dict[str, int]] = None) -> int:

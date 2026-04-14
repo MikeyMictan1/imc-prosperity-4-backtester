@@ -70,7 +70,12 @@ Limits are enforced before orders are matched to order depths. If for a product 
 
 ### Position limits
 
-Known Prosperity 4 products are defined in `prosperity4bt/data.py` (`LIMITS`). The tutorial round uses **80** for `EMERALDS` and `TOMATOES`. Any product not listed there uses a default of **50** until you add it to `LIMITS`.
+Known Prosperity 4 products are defined in `prosperity4bt/data.py` (`LIMITS`).
+
+- Round 0 products: `EMERALDS` = **80**, `TOMATOES` = **80**
+- Round 1 products: `ASH_COATED_OSMIUM` = **80**, `INTARIAN_PEPPER_ROOT` = **80**
+
+Any product not listed there uses a default of **50** until you add it to `LIMITS`.
 
 Override limits from the CLI without editing code:
 
